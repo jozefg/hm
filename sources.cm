@@ -1,0 +1,7 @@
+Library
+    signature TYPEINFER
+    structure TypeInfer
+is
+    infer.sig
+    infer.sml
+    $/basis.cm
