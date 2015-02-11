@@ -1,3 +1,21 @@
+signature TYPEINFER = sig
+    type tvar =  int
+    datatype monotype = TBool
+                      | TArr of monotype * monotype
+                      | TVar of tvar
+    datatype polytype = PolyType of int list * monotype
+    datatype exp = True
+                 | False
+                 | Var of int
+                 | App of exp * exp
+                 | Let of exp * exp
+                 | Fn of exp
+                 | If of exp * exp * exp
+    val infer : exp -> polytype
+end
+
+structure TypeInfer :> TYPEINFER =
+struct
 (* An example of type inference for a tiny ML-like language.
  * Our language includes
  *
@@ -138,9 +156,9 @@ fun unify ([] : constr list) : sol = []
       | (TVar i, TVar j) => (
           case Int.compare (i, j) of
               LESS =>
-              addSol i (TVar j) (unify (substConstrs (TVar j) i  constrs))
+              addSol i (TVar j) (unify (substConstrs (TVar j) i constrs))
             | GREATER =>
-              addSol j (TVar i) (unify (substConstrs (TVar i) j  constrs))
+              addSol j (TVar i) (unify (substConstrs (TVar i) j constrs))
             | EQUAL => unify constrs
       )
       | (TVar i, ty) =>
@@ -189,3 +207,4 @@ fun infer e =
     let val (ty, constrs) = constrain [] e
         val rTy = applySol (unify constrs) ty
     in generalizeMonoType (fn _ => true) rTy end
+end
