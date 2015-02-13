@@ -38,6 +38,132 @@ information about what exactly `'a` and `'x` might be.
 
 Now onto some specifics
 
-## Constraint Generation
 
 ## Unification
+
+A large part of this program is basically "I'll give you a list of
+constraints and you give me the solution". The program to solve these
+proceeds by pattern matching on the constraints.
+
+In the empty case, we have no constraints so we give back the empty
+solution.
+
+``` sml
+    fun unify [] = []
+```
+
+In the next case we actually have to look at what constraint we're
+trying to solve.
+
+``` sml
+      | unify (c :: constrs) =
+        case c of
+```
+
+If we're lucky, we're just trying to unify `TBool` with `TBool`, this
+does nothing since these types have no variables and are equal. In
+this case we just recurse.
+
+``` sml
+       (TBool, TBool) => unify constrs
+```
+
+If we've got two function types, we just constrain their domains and
+ranges to be the same and continue on unifying things.
+
+``` sml
+     | (TArr (l, r), TArr (l', r')) => unify ((l, l') :: (r, r') :: constrs)
+```
+
+Now we have to deal with finding a variable. We definitely want to
+avoid adding `(TVar v, TVar v)` to our solution, so we'll have a
+special case for trying to unify two variables.
+
+``` sml
+     | (TVar i, TVar j) =>
+       if i = j
+       then unify constrs
+       else addSol i (TVar j) (unify (substConstrs (TVar j) i constrs))
+```
+
+This is our first time actually adding something to our solution so
+there's several new elements here. The first is this function
+`addSol`. It's defined as
+
+``` sml
+    fun addSol v ty sol = (v, applySol sol ty) :: sol
+```
+
+So in order to make sure our solution is internally consistent it's
+important that whenever we add a type to our solution we first apply
+the solution to it. This ensures that we can substitute a variable in
+our solution for its corresponding type and not worry about whether we
+need to do something further. Additionally, whenever we add a new
+binding we substitute for it in the constraints we have left to ensure
+we never have a solution which is just inconsistent. This prevents us
+from unifying `v ~ TBool` and `v ~ TArr(TBool, TBool)` in the same
+solution! The actual code for doing this is that
+`substConstr (TVar j) i constrs` bit.
+
+The next case is the general case for unifying a variable with some
+type. It looks very similar to this one.
+
+``` sml
+     | ((TVar i, ty) | (ty, TVar i)) =>
+       if occursIn i ty
+       then raise UnificationError c
+       else addSol i ty (unify (substConstrs ty i constrs))
+```
+
+Here we have the critical `occursIn` check. This checks to see if a
+variable appears in a type and prevents us from making erroneous
+unifications like `TVar a ~ TArr (TVar a, TVar a)`. This occurs check
+is actually very easy to implement
+
+``` sml
+    fun occursIn v ty = List.exists (fn v' => v = v') (freeVars ty)
+```
+
+Finally we have one last case: the failure case. This is the catch-all
+case for if we try to unify two things that are obviously
+incompatible.
+
+``` sml
+     | _ => raise UnificationError c
+```
+
+All together, that code was
+
+``` sml
+    fun applySol sol ty =
+        foldl (fn ((v, ty), ty') => subst ty v ty') ty sol
+    fun applySolCxt sol cxt =
+        let fun applyInfo i =
+                case i of
+                    PolyTypeVar (PolyType (bs, m)) =>
+                    PolyTypeVar (PolyType (bs, (applySol sol m)))
+                  | MonoTypeVar m => MonoTypeVar (applySol sol m)
+        in map applyInfo cxt end
+
+    fun addSol v ty sol = (v, applySol sol ty) :: sol
+
+    fun occursIn v ty = List.exists (fn v' => v = v') (freeVars ty)
+
+    fun unify ([] : constr list) : sol = []
+      | unify (c :: constrs) =
+        case c of
+            (TBool, TBool) => unify constrs
+          | (TVar i, TVar j) =>
+            if i = j
+            then unify constrs
+            else addSol i (TVar j) (unify (substConstrs (TVar j) i constrs))
+          | ((TVar i, ty) | (ty, TVar i)) =>
+            if occursIn i ty
+            then raise UnificationError c
+            else addSol i ty (unify (substConstrs ty i constrs))
+          | (TArr (l, r), TArr (l', r')) =>
+            unify ((l, l') :: (r, r') :: constrs)
+          | _ => raise UnificationError c
+```
+
+## Constraint Generation
