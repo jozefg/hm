@@ -1,5 +1,3 @@
-structure TypeInfer :> TYPEINFER =
-struct
 (* An example of type inference for a tiny ML-like language.
  * Our language includes
  *
@@ -34,6 +32,8 @@ struct
  * absolutely everything.
  *)
 
+structure TypeInfer :> TYPEINFER =
+struct
 (* As mentioned, type variables are just integers: They're globally unique *)
 type tvar = int
 
@@ -88,9 +88,13 @@ fun freeVars t =
 fun mintNewMonoType (PolyType (ls, ty)) =
     foldl (fn (v, t) => subst (TVar (fresh ())) v t) ty ls
 
-fun generalizeMonoType pred ty =
-    PolyType (List.filter pred (freeVars ty), ty)
-
+fun generalizeMonoType ctx ty =
+    let fun notMem xs x = List.all (fn y => x <> y) xs
+        fun free (MonoTypeVar m) = freeVars m
+          | free (PolyTypeVar (PolyType (bs, m))) =
+            List.filter (notMem bs) (freeVars m)
+        val ctxVars = List.concat (List.map free ctx)
+    in PolyType (List.filter (notMem ctxVars) (freeVars ty), ty) end
 
 exception UnboundVar of int
 
@@ -124,6 +128,14 @@ fun substConstrs ty var (cs : constr list) : constr list =
 fun applySol sol ty =
     foldl (fn ((v, ty), ty') => subst ty v ty') ty sol
 
+fun applySolCxt sol cxt =
+    let fun applyInfo i =
+            case i of
+                PolyTypeVar (PolyType (bs, m)) =>
+                PolyTypeVar (PolyType (bs, (applySol sol m)))
+              | MonoTypeVar m => MonoTypeVar (applySol sol m)
+    in map applyInfo cxt end
+
 (* Given a solution, add a new member to the solution ensuring that
  * the rhs of the new part of the solution is normal with respect to the
  * rest of the solution.
@@ -137,58 +149,59 @@ fun unify ([] : constr list) : sol = []
   | unify (c :: constrs) =
     case c of
         (TBool, TBool) => unify constrs
-      | (TVar i, TVar j) => (
-          case Int.compare (i, j) of
-              LESS =>
-              addSol i (TVar j) (unify (substConstrs (TVar j) i constrs))
-            | GREATER =>
-              addSol j (TVar i) (unify (substConstrs (TVar i) j constrs))
-            | EQUAL => unify constrs
-      )
-      | (TVar i, ty) =>
+      | (TVar i, TVar j) =>
+        if i = j
+        then unify constrs
+        else addSol i (TVar j) (unify (substConstrs (TVar j) i constrs))
+      | ((TVar i, ty) | (ty, TVar i)) =>
         if occursIn i ty
         then raise UnificationError c
         else addSol i ty (unify (substConstrs ty i constrs))
-      | (ty, TVar i) =>
-        if occursIn i ty
-        then raise UnificationError c
-        else addSol i ty (unify (substConstrs ty i constrs))
-      | (TArr (l, r), TArr (l', r')) => unify ((l, l') :: (r, r') :: constrs)
+      | (TArr (l, r), TArr (l', r')) =>
+        unify ((l, l') :: (r, r') :: constrs)
       | _ => raise UnificationError c
 
-(* Generate all the constraints on a given expression *)
-fun constrain ctx e =
-    case e of
-        True => (TBool, [])
-      | False => (TBool, [])
-      | If (i, t, e) =>
-        let val (iTy, cs1) = constrain ctx i
-            val (tTy, cs2) = constrain ctx t
-            val (eTy, cs3) = constrain ctx e
-        in (tTy, (iTy, TBool) :: (tTy, eTy) :: cs1 @ cs2 @ cs3) end
-      | Var i => (lookupVar i ctx, [])
-      | Fn body =>
-        let val argTy = TVar (fresh ())
-            val (rTy, cs) = constrain (MonoTypeVar argTy :: ctx) body
-        in (TArr (argTy, rTy), cs) end
-      | App (l, r) =>
-        let val (domTy, ranTy) = (TVar (fresh ()), TVar (fresh ()))
-            val (funTy, cs1) = constrain ctx l
-            val (argTy, cs2) = constrain ctx r
-            val cs = (funTy, TArr (domTy, ranTy)) :: (argTy, domTy) :: cs1 @ cs2
-        in (ranTy, cs) end
-      | Let (e, body) =>
-        let val t = fresh ()
-            val (eTy, cs) = constrain ctx e
-            val sol = unify cs
-            val eTy' = generalizeMonoType (fn x => x > t) (applySol sol eTy)
-            val (rTy, realConstrs) = constrain (PolyTypeVar eTy' :: ctx) body
-        in  (rTy, map (fn (v, ty) => (TVar v, ty)) sol @ realConstrs) end
+fun <+> (sol1, sol2) =
+    let fun inSol2 v = List.all (fn (v', _) => v <> v') sol2
+        val sol1' = List.filter (fn (v, _) => inSol2 v) sol1
+    in
+        map (fn (v, ty) => (v, applySol sol1 ty)) sol2 @ sol1'
+    end
+infixr 3 <+>
+
+(* Generate all the constraints and solve them for a given expression *)
+fun constrain ctx True = (TBool, [])
+  | constrain ctx False = (TBool, [])
+  | constrain ctx (Var i) = (lookupVar i ctx, [])
+  | constrain ctx (Fn body) =
+    let val argTy = TVar (fresh ())
+        val (rTy, sol) = constrain (MonoTypeVar argTy :: ctx) body
+    in (TArr (applySol sol argTy, rTy), sol) end
+  | constrain ctx (If (i, t, e)) =
+    let val (iTy, sol1) = constrain ctx i
+        val (tTy, sol2) = constrain (applySolCxt sol1 ctx) t
+        val (eTy, sol3) = constrain (applySolCxt (sol1 <+> sol2) ctx) e
+    in
+        (tTy, sol1 <+> sol2 <+> sol3 <+> unify [(iTy, TBool), (tTy, eTy)])
+    end
+  | constrain ctx (App (l, r)) =
+    let val (domTy, ranTy) = (TVar (fresh ()), TVar (fresh ()))
+        val (funTy, sol1) = constrain ctx l
+        val (argTy, sol2) = constrain (applySolCxt sol1 ctx) r
+        val sol = unify [(funTy, TArr (domTy, ranTy)), (argTy, domTy)]
+                  <+> sol1
+                  <+> sol2
+    in (ranTy, sol) end
+  | constrain ctx (Let (e, body)) =
+    let val (eTy, sol1) = constrain ctx e
+        val ctx' = applySolCxt sol1 ctx
+        val eTy' = generalizeMonoType ctx' (applySol sol1 eTy)
+        val (rTy, sol2) = constrain (PolyTypeVar eTy' :: ctx') body
+    in (rTy, sol1 <+> sol2) end
 
 (* Finally, infer and solve all the constraints for a type,
  * generating a final, inferred, polytype *)
 fun infer e =
-    let val (ty, constrs) = constrain [] e
-        val rTy = applySol (unify constrs) ty
-    in generalizeMonoType (fn _ => true) rTy end
+    let val (ty, sol) = constrain [] e
+    in generalizeMonoType [] (applySol sol ty) end
 end
