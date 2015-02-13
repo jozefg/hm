@@ -34,6 +34,13 @@
 
 structure TypeInfer :> TYPEINFER =
 struct
+
+fun dedup [] = []
+  | dedup (x :: xs) =
+    if List.exists (fn y => x = y) xs
+    then dedup xs
+    else x :: dedup xs
+
 (* As mentioned, type variables are just integers: They're globally unique *)
 type tvar = int
 
@@ -94,7 +101,8 @@ fun generalizeMonoType ctx ty =
           | free (PolyTypeVar (PolyType (bs, m))) =
             List.filter (notMem bs) (freeVars m)
         val ctxVars = List.concat (List.map free ctx)
-    in PolyType (List.filter (notMem ctxVars) (freeVars ty), ty) end
+        val polyVars = List.filter (notMem ctxVars) (freeVars ty)
+    in PolyType (dedup polyVars, ty) end
 
 exception UnboundVar of int
 
