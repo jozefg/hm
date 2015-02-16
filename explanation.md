@@ -167,3 +167,7 @@ All together, that code was
 ```
 
 ## Constraint Generation
+
+The other half of this algorithm is the constraint generation part. We
+generate constraints and use `unify` to turn them into solutions. One
+critical portion of this.
