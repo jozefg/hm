@@ -38,6 +38,139 @@ information about what exactly `'a` and `'x` might be.
 
 Now onto some specifics
 
+## Set Up
+
+In order to actually talk about type inference we first have to define
+our language. We have the abstract syntax tree:
+
+``` sml
+    type tvar = int
+    local val freshSource = ref 0 in
+    fun fresh () : tvar =
+        !freshSource before freshSource := !freshSource + 1
+    end
+
+
+    datatype monotype = TBool
+                      | TArr of monotype * monotype
+                      | TVar of tvar
+    datatype polytype = PolyType of int list * monotype
+
+    datatype exp = True
+                 | False
+                 | Var of int
+                 | App of exp * exp
+                 | Let of exp * exp
+                 | Fn of exp
+                 | If of exp * exp * exp
+```
+
+First we have type variables which are globally unique integers. To
+give us a method for actually producing them we have `fresh` which
+uses a ref-cell to never return the same result twice. From there we
+have mono-types. These are normal ML types without any
+polymorphism. There are type variables, booleans, and
+functions. Polytypes are just monotypes with an extra `forall` at the
+front. This is where we get polymorphism from. A polytype binds a
+number of type variables, stored in this representation as an int
+list.
+
+Finally, we have expressions. Aside form the normal constants, we have
+variables, lambdas, applications, and if. The way we represent
+variables here is with DeBruijn variables. A variable is a number that
+tells you how many binders are between it and where it was bound. For
+example, `const` would be written `Fn (Fn (Var 1))` in this
+representation.
+
+With this in mind we define some helpful utility functions. When type
+checking, we have a context full of information. The two facts we know
+are
+
+``` sml
+    datatype info = PolyTypeVar of polytype
+                  | MonoTypeVar of monotype
+
+    type context = info list
+```
+
+Where the ith element of a context indicates the piece of information
+we know about the ith DeBruijn variable. We'll also need to
+substitute a type variable for a type. We also want to be able to find
+out all the free variables in a type.
+
+``` sml
+    fun subst ty' var ty =
+        case ty of
+            TVar var' => if var = var' then ty' else TVar var'
+          | TArr (l, r) => TArr (subst ty' var l, subst ty' var r)
+          | TBool => TBool
+
+    fun freeVars t =
+        case t of
+            TVar v => [v]
+          | TArr (l, r) => freeVars l @ freeVars r
+          | TBool => []
+```
+
+Both of these functions just recurse over types and do some work at
+the variable case. Note that `freeVars` can contain duplicates, this
+turns out not to be important in all cases except one:
+`generalizeMonoType`. The basic idea is that given a monotype with a
+bunch of unification variables and a surrounding context, figure out
+which variables can be bound up in a polymorphic type. If they don't
+appear in the surrounding context, we generalize them by binding them
+in a new poly type's forall spot.
+
+``` sml
+    fun dedup [] = []
+      | dedup (x :: xs) =
+        if List.exists (fn y => x = y) xs
+        then dedup xs
+        else x :: dedup xs
+
+    fun generalizeMonoType ctx ty =
+        let fun notMem xs x = List.all (fn y => x <> y) xs
+            fun free (MonoTypeVar m) = freeVars m
+              | free (PolyTypeVar (PolyType (bs, m))) =
+                List.filter (notMem bs) (freeVars m)
+
+            val ctxVars = List.concat (List.map free ctx)
+            val polyVars = List.filter (notMem ctxVars) (freeVars ty)
+        in PolyType (dedup polyVars, ty) end
+```
+
+Here the bulk of the code is deciding whether or not a variable is
+free in the surrounding context using `free`. It looks at a piece of
+info to determine what variables occur in it. We then accumulate all of
+these variables into `cxtVars` and use this list to decide what to
+generalize.
+
+Next we need to take a polytype to a monotype. This is the
+specialization of a polymorphic type that we love and use when we use
+`map` on a function from `int -> double`. This works by taking each
+bound variable and replacing it with a fresh unification
+variables. This is nicely handled by folds!
+
+``` sml
+    fun mintNewMonoType (PolyType (ls, ty)) =
+        foldl (fn (v, t) => subst (TVar (fresh ())) v t) ty ls
+```
+
+Last but not least, we have a function to take a context and a
+variable and give us a monotype which corresponds to it. This may
+produce a new monotype if we think the variable has a polytype.
+
+``` sml
+    exception UnboundVar of int
+    fun lookupVar var ctx =
+        case List.nth (ctx, var) handle Subscript => raise UnboundVar var of
+            PolyTypeVar pty => mintNewMonoType pty
+          | MonoTypeVar mty => mty
+```
+
+For the sake of nice error messages, we also throw `UnboundVar`
+instead of just subscript in the error case. Now that we've gone
+through all of the utility functions, on to unification!
 
 ## Unification
 
