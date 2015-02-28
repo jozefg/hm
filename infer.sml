@@ -189,16 +189,20 @@ fun constrain ctx True = (TBool, [])
     let val (iTy, sol1) = constrain ctx i
         val (tTy, sol2) = constrain (applySolCxt sol1 ctx) t
         val (eTy, sol3) = constrain (applySolCxt (sol1 <+> sol2) ctx) e
+        val sol = sol1 <+> sol2 <+> sol3
+        val sol = sol <+> unify [ (applySol sol iTy, TBool)
+                                , (applySol sol tTy, applySol sol eTy)]
     in
-        (tTy, sol1 <+> sol2 <+> sol3 <+> unify [(iTy, TBool), (tTy, eTy)])
+        (tTy, sol)
     end
   | constrain ctx (App (l, r)) =
     let val (domTy, ranTy) = (TVar (fresh ()), TVar (fresh ()))
         val (funTy, sol1) = constrain ctx l
         val (argTy, sol2) = constrain (applySolCxt sol1 ctx) r
-        val sol = unify [(funTy, TArr (domTy, ranTy)), (argTy, domTy)]
-                  <+> sol1
-                  <+> sol2
+        val sol = sol1 <+> sol2
+        val sol = sol <+> unify [(applySol sol funTy,
+                                  applySol sol (TArr (domTy, ranTy)))
+                                , (applySol sol argTy, applySol sol domTy)]
     in (ranTy, sol) end
   | constrain ctx (Let (e, body)) =
     let val (eTy, sol1) = constrain ctx e
