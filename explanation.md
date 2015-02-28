@@ -302,5 +302,124 @@ All together, that code was
 ## Constraint Generation
 
 The other half of this algorithm is the constraint generation part. We
-generate constraints and use `unify` to turn them into solutions. One
-critical portion of this.
+generate constraints and use `unify` to turn them into solutions. This
+boils down to two functoins. The first is to glue together solutions.
+
+``` sml
+    fun <+> (sol1, sol2) =
+        let fun notInSol2 v = List.all (fn (v', _) => v <> v') sol2
+            val sol1' = List.filter (fn (v, _) => notInSol2 v) sol1
+        in
+            map (fn (v, ty) => (v, applySol sol1 ty)) sol2 @ sol1'
+        end
+    infixr 3 <+>
+```
+
+Given two solutions we figure out which things don't occur in the in
+the second solution. Next, we apply solution 1 everywhere in the
+second solution, giving a consistent solution wihch contains
+everything in `sol2`, finally we add in all the stuff not in `sol2`
+but in `sol1`. This doesn't check to make sure that the solutions are
+actually consistent, this is done elsewhere.
+
+Next is the main function here `constrain`. This actually generates
+solution and type given a context and an expression. The first few
+cases are nice and simple
+
+``` sml
+    fun constrain ctx True = (TBool, [])
+      | constrain ctx False = (TBool, [])
+      | constrain ctx (Var i) = (lookupVar i ctx, [])
+```
+
+In these cases we don't infer any constraints, we just figure out
+types based on information we know previously. Next for `Fn` we
+generate a fresh variable to represent the arguments type and just
+constrain the body.
+
+``` sml
+      | constrain ctx (Fn body) =
+        let val argTy = TVar (fresh ())
+            val (rTy, sol) = constrain (MonoTypeVar argTy :: ctx) body
+        in (TArr (applySol sol argTy, rTy), sol) end
+```
+
+Once we have the solution for the body, we apply it to the argument
+type which might replace it with a concrete type if the constraints we
+inferred for the body demand it. For `If` we do something similar
+except we add a few constraints of our own to solve.
+
+``` sml
+      | constrain ctx (If (i, t, e)) =
+        let val (iTy, sol1) = constrain ctx i
+            val (tTy, sol2) = constrain (applySolCxt sol1 ctx) t
+            val (eTy, sol3) = constrain (applySolCxt (sol1 <+> sol2) ctx) e
+            val sol = sol1 <+> sol2 <+> sol3
+            val sol = sol <+> unify [ (applySol sol iTy, TBool)
+                                    , (applySol sol tTy, applySol sol eTy)]
+        in
+            (tTy, sol)
+        end
+```
+
+Notice how we apply each solution to the context for the next thing
+we're constraining. This is how we ensure that each solution will be
+consistent. Once we've generated solutions to the constraints in each
+of the subterms, we smash them together to produce the first
+solution. Next, we ensure that the subcomponents have the right type
+by generating a few constraints to ensure that `iTy` is a bool and
+that `tTy` and `eTy` (the types of the branches) are both the same. We
+have to carefully apply the `sol` to each of these prior to unifying
+them to make sure our solution stays consistent.
+
+This is practically the same as what the `App` case is
+
+``` sml
+      | constrain ctx (App (l, r)) =
+        let val (domTy, ranTy) = (TVar (fresh ()), TVar (fresh ()))
+            val (funTy, sol1) = constrain ctx l
+            val (argTy, sol2) = constrain (applySolCxt sol1 ctx) r
+            val sol = sol1 <+> sol2
+            val sol = sol <+> unify [(applySol sol funTy,
+                                      applySol sol (TArr (domTy, ranTy)))
+                                    , (applySol sol argTy, applySol sol domTy)]
+        in (ranTy, sol) end
+```
+
+The only real difference here is that we generate different
+constraints: we make sure we're applying a function whose domain is the
+same as the argument type.
+
+The most interesting case here is `Let`. This implements let
+generalization which is how we actually get polymorphism. After
+inferring the type of the thing we're binding we generalize it, giving
+us a poly type to use in the body of let. The key to generalizing it
+is that `generalizeMonoType` we had before.
+
+``` sml
+      | constrain ctx (Let (e, body)) =
+        let val (eTy, sol1) = constrain ctx e
+            val ctx' = applySolCxt sol1 ctx
+            val eTy' = generalizeMonoType ctx' (applySol sol1 eTy)
+            val (rTy, sol2) = constrain (PolyTypeVar eTy' :: ctx') body
+        in (rTy, sol1 <+> sol2) end
+```
+
+We do pretty much everything we had before except now we carefully
+ensure to apply the solution we get for the body to the context and
+then to generalize the type with respect to that new context. This is
+how we actually get polymorphism, it will assign a proper polymorphic
+type to the argument.
+
+That wraps up constraint generation. Now all that's left to see if the
+overall driver for type inference.
+
+``` sml
+    fun infer e =
+        let val (ty, sol) = constrain [] e
+        in generalizeMonoType [] (applySol sol ty) end
+    end
+```
+
+So all we do is infer and generalize a type! And there you have it,
+that's how ML and Haskell do type inference.
