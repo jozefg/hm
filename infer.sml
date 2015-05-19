@@ -1,38 +1,4 @@
-(* An example of type inference for a tiny ML-like language.
- * Our language includes
- *
- *   - Functions
- *   - Booleans
- *   - If expressions
- *   - Let abstraction
- *
- * This means the types are function types [t -> t] and booleans
- * [bool] as well as type variables for polymorphic types
- *
- * To simplify the process of representing variables, we use something
- * called DeBruijn indices (pronounced "DeBrown"). With these a
- * variable is a number that counts how many binders it is away from
- * where it was bound
- *
- * So if we had
- *
- *   __________
- *  |          |
- * fn => fn => 1 + 0
- *        |________|
- *
- * The 0 refers to the inner binder and the 1 to the binder 1 binder
- * away. Here's the wikipedia article:
- *    http://www.wikiwand.com/en/De_Bruijn_index
- *
- * For types we'll just use numbers to indicate binding. Since we
- * never have nested scopes (all the binders for a type are fully
- * shifted to the left) we don't need a clever scheme like DeBruijn
- * indices. We don't allow the user to annotate types: we infer
- * absolutely everything.
- *)
-
-structure TypeInfer :> TYPEINFER =
+structure TypeInfer (* :> TYPEINFER *) =
 struct
 
 fun dedup [] = []
@@ -41,77 +7,91 @@ fun dedup [] = []
     then dedup xs
     else x :: dedup xs
 
-(* As mentioned, type variables are just integers: They're globally unique *)
-type tvar = int
+(* A normal (not polymorphic) type *)
+structure TpOps =
+struct
+  datatype t = Bool | Arr | All of int
+  val eq = op=
 
-(* Cough, cough, ignore this bit. It lets us generate fresh type
- * variables but uses some features of SML we haven't talked about yet *)
-local val freshSource = ref 0 in
-fun fresh () : tvar =
-    !freshSource before freshSource := !freshSource + 1
+  fun arity Bool = []
+    | arity Arr = [0, 0]
+    | arity (All i) = [i]
+
+  fun toString Bool = "bool"
+    | toString Arr = "arr"
+    | toString (All i) = "all[" ^ Int.toString i ^ "]"
 end
 
-(* A normal (not polymorphic) type *)
-datatype monotype = TBool
-                  | TArr of monotype * monotype
-                  | TVar of tvar
-
-(* A polymorphic type which has binds a list of type variables *)
-datatype polytype = PolyType of int list * monotype
+structure Tp = Abt(structure O = TpOps; structure V = Variable)
 
 (* Our definition of expressions in our language *)
-datatype exp = True
-             | False
-             | Var of int
-             | App of exp * exp
-             | Let of exp * exp
-             | Fn of exp
-             | If of exp * exp * exp
+structure ExpOps =
+struct
+  datatype t = True | False | App | Let | Fn | If
 
-(* A piece of information we know about a particular variable. We
-   either know it has a polytype or a monotype *)
-datatype info = PolyTypeVar of polytype
-              | MonoTypeVar of monotype
+  val eq = op=
 
-(* A list of information. The ith entry is about the DeBruijn variable i *)
-type context = info list
+  fun arity True = []
+    | arity False = []
+    | arity App = [0, 0]
+    | arity Let = [0, 1]
+    | arity Fn = [1]
+    | arity If = [0, 0, 0]
 
-(* Substitute some type var for another type *)
-fun subst ty' var ty =
-    case ty of
-        TVar var' => if var = var' then ty' else TVar var'
-      | TArr (l, r) => TArr (subst ty' var l, subst ty' var r)
-      | TBool => TBool
+  fun toString True = "true"
+    | toString False = "false"
+    | toString App = "app"
+    | toString Let = "let"
+    | toString Fn = "fn"
+    | toString If = "if"
+end
 
-(* Collect a list of all the variables in a type *)
-fun freeVars t =
-    case t of
-        TVar v => [v]
-      | TArr (l, r) => freeVars l @ freeVars r
-      | TBool => []
+structure Exp = Abt(structure O = ExpOps; structure V = Variable)
+
+structure Context = RedBlackDict(structure Key = struct
+                                   open Variable
+                                   val eq = op=
+                                 end)
+
+type context = Tp.t Context.dict
+
 
 (* Any polytype can construct a new monotype with the polymorphic
  * variables replaced by fresh weakly polymorphic variables *)
-fun mintNewMonoType (PolyType (ls, ty)) =
-    foldl (fn (v, t) => subst (TVar (fresh ())) v t) ty ls
+local
+    open Tp
+    open TpOps
+in
+fun mintNewMonoType e =
+    case out e of
+        Oper (All 0, [b]) => b
+      | Oper (All i, [b]) => (
+          case out b of
+              Bind (_, b') => mintNewMonoType (oper (All (i - 1)) [b'])
+            | _ => raise Fail "Impossible"
+      )
+      | _ => e
+end
 
 fun generalizeMonoType ctx ty =
     let fun notMem xs x = List.all (fn y => x <> y) xs
-        fun free (MonoTypeVar m) = freeVars m
-          | free (PolyTypeVar (PolyType (bs, m))) =
-            List.filter (notMem bs) (freeVars m)
-        val ctxVars = List.concat (List.map free ctx)
-        val polyVars = List.filter (notMem ctxVars) (freeVars ty)
-    in PolyType (dedup polyVars, ty) end
+        val ctxVars = (List.concat
+                       o List.map #2
+                       o Context.toList
+                       o Context.map Tp.free) ctx
+        val polyVars = List.filter (notMem ctxVars) (Tp.free ty)
+        val ty' = List.foldl (fn (v, t) => Tp.bind v t) ty polyVars
+    in Tp.oper (TpOps.All (List.length polyVars)) [ty'] end
 
-exception UnboundVar of int
+exception UnboundVar of Variable.t
 
 (* Lookup a variable in a list. If we don't find the variable then we throw
  * an UnboundVar exception *)
 fun lookupVar var ctx =
-    case List.nth (ctx, var) handle Subscript => raise UnboundVar var of
-        PolyTypeVar pty => mintNewMonoType pty
-      | MonoTypeVar mty => mty
+    case Context.find ctx var of
+        NONE => raise UnboundVar var
+      | SOME tp => mintNewMonoType tp
+
 
 (* A big part of the type checker is the generation of
  * "constraints". These are assertions that some type is equivalent to
@@ -121,99 +101,124 @@ fun lookupVar var ctx =
  * Once we solve these constrains we get a [sol] which is a list of
  * variables to the monotypes the become.
  *)
-type constr = (monotype * monotype)
-type sol    = (tvar * monotype) list
+structure Sol = RedBlackDict(structure Key = struct
+                               open Variable
+                               val eq = op=
+                             end)
+
+type constr = Tp.t * Tp.t
+type sol    = Tp.t Sol.dict
 
 exception UnificationError of constr
 
 (* Substitute a type for a type variable in a list of constraints *)
 fun substConstrs ty var (cs : constr list) : constr list =
-    map (fn (l, r) => (subst ty var l, subst ty var r)) cs
+    map (fn (l, r) => (Tp.subst ty var l, Tp.subst ty var r)) cs
 
 (* Given a solution and a type, apply the solution by rewriting each
  * variable with what the solution says it's equivalent to.
  *)
 fun applySol sol ty =
-    foldl (fn ((v, ty), ty') => subst ty v ty') ty sol
+    Sol.foldl (fn (v, ty, ty') => Tp.subst ty v ty') ty sol
 
-fun applySolCxt sol cxt =
-    let fun applyInfo i =
-            case i of
-                PolyTypeVar (PolyType (bs, m)) =>
-                PolyTypeVar (PolyType (bs, (applySol sol m)))
-              | MonoTypeVar m => MonoTypeVar (applySol sol m)
-    in map applyInfo cxt end
+fun applySolCxt sol cxt = Context.map (applySol sol) cxt
+
 
 (* Given a solution, add a new member to the solution ensuring that
  * the rhs of the new part of the solution is normal with respect to the
  * rest of the solution.
  *)
-fun addSol v ty sol = (v, applySol sol ty) :: sol
+fun addSol v ty sol = Sol.insert sol v (applySol sol ty)
+
 
 (* Returns true if a variable occurs in the type *)
-fun occursIn v ty = List.exists (fn v' => v = v') (freeVars ty)
+fun occursIn v ty = List.exists (fn v' => v = v') (Tp.free ty)
 
-fun unify ([] : constr list) : sol = []
-  | unify (c :: constrs) =
-    case c of
-        (TBool, TBool) => unify constrs
-      | (TVar i, TVar j) =>
+local
+    open TpOps
+    open Tp
+in
+fun unify ([] : constr list) : sol = Sol.empty
+  | unify ((l, r) :: constrs) =
+    case (out l, out r) of
+        (Oper (Bool, []), Oper (Bool, [])) => unify constrs
+      | (Var i, Var j) =>
         if i = j
         then unify constrs
-        else addSol i (TVar j) (unify (substConstrs (TVar j) i constrs))
-      | ((TVar i, ty) | (ty, TVar i)) =>
-        if occursIn i ty
-        then raise UnificationError c
-        else addSol i ty (unify (substConstrs ty i constrs))
-      | (TArr (l, r), TArr (l', r')) =>
+        else addSol i (var j) (unify (substConstrs (var j) i constrs))
+      | ((Var i, ty) | (ty, Var i)) =>
+        if occursIn i (into ty)
+        then raise UnificationError (l, r)
+        else addSol i (into ty) (unify (substConstrs (into ty) i constrs))
+      | (Oper (Arr, [l, r]), Oper (Arr, [l', r'])) =>
         unify ((l, l') :: (r, r') :: constrs)
-      | _ => raise UnificationError c
+      | _ => raise UnificationError (l, r)
+end
+
 
 fun <+> (sol1, sol2) =
-    let fun inSol2 v = List.all (fn (v', _) => v <> v') sol2
-        val sol1' = List.filter (fn (v, _) => inSol2 v) sol1
+    let
+        val sol1' = List.foldl (fn (v, s) => Sol.remove s v)
+                               sol1
+                               (Sol.domain sol2)
     in
-        map (fn (v, ty) => (v, applySol sol1 ty)) sol2 @ sol1'
+        Sol.union (Sol.map (fn ty => applySol sol1 ty) sol2)
+                  sol1'
+                  (fn (_, tp, _) => tp)
     end
 infixr 3 <+>
 
+local
+    open ExpOps
+    open Exp
+    open TpOps
+in
 (* Generate all the constraints and solve them for a given expression *)
-fun constrain ctx True = (TBool, [])
-  | constrain ctx False = (TBool, [])
-  | constrain ctx (Var i) = (lookupVar i ctx, [])
-  | constrain ctx (Fn body) =
-    let val argTy = TVar (fresh ())
-        val (rTy, sol) = constrain (MonoTypeVar argTy :: ctx) body
-    in (TArr (applySol sol argTy, rTy), sol) end
-  | constrain ctx (If (i, t, e)) =
-    let val (iTy, sol1) = constrain ctx i
-        val (tTy, sol2) = constrain (applySolCxt sol1 ctx) t
-        val (eTy, sol3) = constrain (applySolCxt (sol1 <+> sol2) ctx) e
-        val sol = sol1 <+> sol2 <+> sol3
-        val sol = sol <+> unify [ (applySol sol iTy, TBool)
-                                , (applySol sol tTy, applySol sol eTy)]
-    in
-        (tTy, sol)
-    end
-  | constrain ctx (App (l, r)) =
-    let val (domTy, ranTy) = (TVar (fresh ()), TVar (fresh ()))
-        val (funTy, sol1) = constrain ctx l
-        val (argTy, sol2) = constrain (applySolCxt sol1 ctx) r
-        val sol = sol1 <+> sol2
-        val sol = sol <+> unify [(applySol sol funTy,
-                                  applySol sol (TArr (domTy, ranTy)))
+fun constrain ctx e =
+    case out e of
+        Oper (True, []) => (Tp.oper Bool [], Sol.empty)
+      | Oper (False, []) => (Tp.oper Bool [], Sol.empty)
+      | Var i => (lookupVar i ctx, Sol.empty)
+      | Oper (Fn, [e]) =>
+        let val Bind (x, body) = out e
+            val argTy = Tp.var (Variable.gen "argTy")
+            val (rTy, sol) = constrain (Context.insert ctx x argTy) body
+        in (Tp.oper Arr [applySol sol argTy, rTy], sol) end
+      | Oper (If, [i, t, e]) =>
+        let val (iTy, sol1) = constrain ctx i
+            val (tTy, sol2) = constrain (applySolCxt sol1 ctx) t
+            val (eTy, sol3) = constrain (applySolCxt (sol1 <+> sol2) ctx) e
+            val sol = sol1 <+> sol2 <+> sol3
+            val sol = sol <+> unify [ (applySol sol iTy, Tp.oper Bool [])
+                                    , (applySol sol tTy, applySol sol eTy)]
+        in
+            (tTy, sol)
+        end
+      | Oper (App, [l, r]) =>
+        let val domTy = Tp.var (Variable.gen "domTy")
+            val ranTy = Tp.var (Variable.gen "ranTy")
+            val (funTy, sol1) = constrain ctx l
+            val (argTy, sol2) = constrain (applySolCxt sol1 ctx) r
+            val sol = sol1 <+> sol2
+            val sol = sol <+>
+                          unify [(applySol sol funTy,
+                                  applySol sol (Tp.oper Arr [domTy, ranTy]))
                                 , (applySol sol argTy, applySol sol domTy)]
-    in (ranTy, sol) end
-  | constrain ctx (Let (e, body)) =
-    let val (eTy, sol1) = constrain ctx e
-        val ctx' = applySolCxt sol1 ctx
-        val eTy' = generalizeMonoType ctx' (applySol sol1 eTy)
-        val (rTy, sol2) = constrain (PolyTypeVar eTy' :: ctx') body
-    in (rTy, sol1 <+> sol2) end
+        in (ranTy, sol) end
+
+      | Oper (Let, [e, b]) =>
+        let val Bind (x, body) = out b
+            val (eTy, sol1) = constrain ctx e
+            val ctx' = applySolCxt sol1 ctx
+            val eTy' = generalizeMonoType ctx' (applySol sol1 eTy)
+            val (rTy, sol2) = constrain (Context.insert ctx' x eTy') body
+        in (rTy, sol1 <+> sol2) end
+      | _ => raise Fail "Impossible"
+end
 
 (* Finally, infer and solve all the constraints for a type,
  * generating a final, inferred, polytype *)
 fun infer e =
-    let val (ty, sol) = constrain [] e
-    in generalizeMonoType [] (applySol sol ty) end
+    let val (ty, sol) = constrain Context.empty e
+    in generalizeMonoType Context.empty (applySol sol ty) end
 end
