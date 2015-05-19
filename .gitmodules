@@ -1,0 +1,6 @@
+[submodule "simple-abt"]
+	path = simple-abt
+	url = ssh://git@bitbucket.org/jozefg/simple-abt
+[submodule "cmlib"]
+	path = cmlib
+	url = ssh://git@github.com/standardml/cmlib
