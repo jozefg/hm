@@ -1,4 +1,4 @@
-structure TypeInfer (* :> TYPEINFER *) =
+structure TypeInfer :> TYPEINFER =
 struct
 
 fun dedup [] = []
