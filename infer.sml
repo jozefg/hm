@@ -79,7 +79,7 @@ fun generalizeMonoType ctx ty =
                        o List.map #2
                        o Context.toList
                        o Context.map Tp.free) ctx
-        val polyVars = List.filter (notMem ctxVars) (Tp.free ty)
+        val polyVars = dedup (List.filter (notMem ctxVars) (Tp.free ty))
         val ty' = List.foldl (fn (v, t) => Tp.bind v t) ty polyVars
     in Tp.oper (TpOps.All (List.length polyVars)) [ty'] end
 
