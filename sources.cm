@@ -4,4 +4,6 @@ Library
 is
     infer.sig
     infer.sml
-    $/basis.cm
+
+    simple-abt/sources.cm
+    cmlib/cmlib.cm
